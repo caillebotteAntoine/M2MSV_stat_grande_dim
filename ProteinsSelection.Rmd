@@ -1,0 +1,313 @@
+---
+title: "Proteins selection"
+author: "Antoine caillebotte"
+date: "07/02/2022"
+output: html_document
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 1000px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+```{r setup, include = F}
+rm(list = ls()) ; graphics.off()
+
+library(knitr)
+library(kableExtra)
+
+opts_chunk$set(echo = T, message = F, warning = F,
+               fig.weightedidth = 15,
+               fig.asp = 0.8,
+               out.weightedidth = "100%")
+
+
+rm(list = ls()) ; graphics.off()
+
+pck <- c('tidyverse', 'tictoc',
+         'ggplot2', 'reshape2',
+         'MultiVarSel', 'doParallel')
+
+install.packages(setdiff(pck, rownames(installed.packages())))
+
+require(tidyverse)
+
+require(ggplot2)
+require(reshape2)
+
+require(MultiVarSel)
+require(doParallel)
+
+require(tictoc)
+```
+
+
+
+
+```{r loading}
+data <- read.csv2('table_proteome_FH_all.csv') %>% 
+  select(-rep) %>% #rep représente le numero de réparition de l'exp ... pas utile
+  mutate_if(is.character, as.factor)
+
+#str(data)
+#View(data)
+dim(data)
+
+not_var <- c('sample', 'group', 'temperature', 'imbibition')
+
+```
+
+
+```{r fun}
+#juste pour le fun
+data[,1:20] %>% melt(id = not_var) %>% ggplot(aes(variable, value, fill = group)) +
+  geom_bar(position='dodge', stat='identity') +
+  theme(legend.position = 'none')
+
+```
+
+ DS (Dry seed),
+ EI (Early imbibition) 
+     après 6h correspondant à la fin de la prise d’eau, 
+ LI (Late imbibition)
+     après 20h
+
+
+## Construction de Y et X
+
+
+```{r X and Y}
+#data %>% select(c('sample', 'group', 'temperature', 'imbibition'))
+
+Y <- data %>% select(-c('sample', 'group', 'temperature', 'imbibition')) %>%
+  as.matrix
+
+Y %>% dim #27x494
+
+#Matrice des prédicteurs
+X <- model.matrix(lm(Y ~ group + 0, data = data) )
+colnames(X) <- colnames(X) %>% str_replace('group','')
+
+X %>% dim #27x9
+```
+
+
+Centrage et réduction de Y
+
+```{r scale of Y}
+
+which(colMeans(Y) == 0)
+which(Y %>% apply(2,sd) == 0)
+
+Y <- scale(Y)
+```
+
+```{r whitening}
+lm.res <- lm(Y ~ X + 0 )
+#terms(lm.res) #Pour vérifier le slope et l'intercept
+
+residus <- lm.res$residual
+
+#Teste du bruit blanc sans blanchissement
+#Teste du porte manteau
+white.pvalue <- whitening_test(residus)
+white.pvalue #0.7556
+```
+
+```{r choice of whitening}
+whitening_choice(residus, c('AR1', 'nonparam', 'ARMA'), 
+                 pAR = 2, qMA = 0)
+
+
+## => on choisie le modèle nonparametric
+covar.sqare.hat <- whitening(residus,'nonparam')
+```
+
+```{r joujou de la prof}
+# require(BlockCov)
+# res_block <- Sigma_estimation(residus,
+#                            reorder = TRUE, inv_12 = TRUE)
+# 
+# ########################################
+# ##### Choix du blanchiment #############
+# ########################################
+# cor_residus <- cor(residus)
+# mat_residus <- cor_residus[upper.tri(cor_residus)]
+# 
+# cor_res_blanch1 <- cor(residus %*% as.matrix(covar.sqare.hat))
+# mat_res_blanch1 <- cor_res_blanch1[upper.tri(cor_res_blanch1)]
+# 
+# cor_res_blanch2 <- cor(residus %*% as.matrix(res_block$S_inv_12))
+# mat_res_blanch2 <- cor_res_blanch2[upper.tri(cor_res_blanch2)]
+# 
+# res_blanch_data <- data.frame(sans_blanch = cor_residus %>% as.numeric,
+#                               blanch_toeplitz = cor_res_blanch1 %>% as.numeric,
+#                               banch_bloc = cor_res_blanch2 %>% as.numeric)
+# boxplot(res_blanch_data)
+# abline(h=0,col='red')
+```
+
+
+# Sélection de variable
+
+```{r variable selection}
+tic()
+
+cores <- parallel::detectCores() -2 
+cl <- makePSOCKcluster(cores) ; registerDoParallel(cl)
+
+# freqs <- variable_selection(Y,X,covar.sqare.hat, nb_repli = 1000, parallel=T) 
+# freqs %>% 
+#   rename( proteins = Names_of_Y, group = Names_of_X) %>%
+#   saveRDS('freqs.rds')
+
+stopCluster(cl)
+
+freqs <- readRDS('freqs.rds')
+
+toc()
+
+plot(sort(freqs$frequency,decreasing = T),type='s')
+```
+
+
+
+## selection par seuil
+
+Rappel du modèle vectorisé
+
+$vec(Y\hat \Sigma_q^{-1/2}) = (\hat\Sigma_q^{-1/2})^T \otimes X  vec B   + vec(E  \Sigma_q^{-1/2})$
+
+```{r threshold}
+threshold <- 0.95
+
+id <- which(freqs$frequency >= threshold)
+
+#\vec(Y\hat \Sigma_q^{-1/2}) = (\hat\Sigma_q^{-1/2})^T \otimes X  \vec B   + \vec(E  \Sigma_q^{-1/2})
+
+Y.vec = (Y %*% covar.sqare.hat) %>% as.numeric
+X.select = kronecker( t(covar.sqare.hat), X) %>% { .[,id]}
+B.vec.hat <- solve( t(X.select)%*%X.select , t(X.select) %*% Y.vec) %>% as.numeric()
+
+freqs$estim = rep(0, ncol(X)*ncol(Y))
+freqs$estim[id] = B.vec.hat
+
+#Affichage
+freqs %>% filter(frequency >= threshold) %>% ggplot(aes(proteins, group, col = estim)) +
+  geom_point(size = 2) +  scale_color_gradient2(low='steelblue',mid = 'white', high ='red')+
+  theme(axis.text.x = element_text(angle=90) )
+```
+
+
+
+
+
+#Box plot
+
+```{r box plot}
+proteins.selected <- unique(freqs[id,'proteins'])
+
+Y.selected <- Y[, colnames(Y) %in% proteins.selected ] %>% as_tibble
+
+
+Y.selected[,1:8] %>% mutate(group = data$group) %>% melt(id = 'group') %>%
+  ggplot(aes(group, value , fill = group)) +
+    geom_boxplot()+
+  
+    facet_wrap( ~ variable, ncol=4)+
+  
+    labs(y = 'Réponse') +
+    theme(axis.title.x=element_blank(),
+          axis.text.x=element_blank(),
+          axis.ticks.x=element_blank())
+
+```
+##arbre de décision
+
+```{r arbre de décision}
+residus.selected <- residus[, colnames(residus) %in% proteins.selected]
+hc = hclust(dist(1 - abs(cor(residus.selected))))
+
+
+require(dendextend)
+dd <- hc %>% as.dendrogram
+
+k = 5
+col = rainbow(k)
+
+dd  %>% set("labels_cex", 0.5) %>% 
+  set("labels_col", value = col, k =k)  %>% 
+  set("branches_k_color", k = k) %>%
+  plot(horiz = T)
+
+abline(v = 2.9, col = 'red', lwd = 3, lty = 2)
+
+
+
+
+```
+
+
+
+
+
+
+$$\hat{a_1} = \frac{1}{p}tr(S) \text{ et }
+    \hat{a_2} = \frac{n^2}{(n-1)(n-2)p}\left[tr(S^2) - \frac{1}{n}(tr(S))^2\right]$$
+
+
+
+D'après le théorème 1 de l'article :
+    $$\hat a_3 = \frac \tau p \left(tr(S^3) - \frac 3 n tr(S^2) tr(S) + \frac 2{n^2}(tr(S))^3\right)$$
+avec
+    $\tau = \frac{n^4}{(n-1)(n-2)(n+2)(n+4)}$
+
+Fisher et al. (2010)
+    $$a_4 = \frac\gamma p \left[ tr(S^4) - \frac 4 n tr(S^3)tr(S) - \eta tr(S^2)^2 + \mu tr(S^2)tr(S)^2 - \nu tr(S)^4\right]$$
+avec : 
+    $\left{\begin{array}{cc}\eta = \frac{2n^2+3n-6}{n(n^2+n+2)}\\ \mu =\frac{2(5n+6)}{n(n^2+n+2)} \\ \nu=\frac{5n+6}{n^2(n^2+n+2)} \end{array} \right.$
+
+
+
+```{r article}
+S <- covar.sqare.hat %*% covar.sqare.hat
+S2 <- S  %*% S
+S3 <- S2 %*% S
+S4 <- S3 %*% S
+
+
+p <- ncol(S)
+n <- nrow(data)
+c <- p/n
+
+tr <-  function(A) sum(diag(A))
+
+
+a1.hat <- 1/p * tr(S)
+a2.hat <- n^2/( (n-1)*(n-2)*p ) *( tr(S2) -1/n*tr(S)^2 )
+
+tau <- n^4/ ( (n-1)*(n-2)*(n+2)*(n+4))
+a3.hat <- tau/p * ( tr(S3) -3/n*tr(S2)*tr(S) +2/n^2*tr(S)^3 )
+
+gamma <- (n^5*(n^2+n+2))/((n+1)*prod(n+2*1:3)*prod(n-1:3))
+eta = (2*n^2+3*n-6)/(n*(n^2+n+2))
+mu = (2*(5*n+6))/(n*(n^2+n+2))
+nu = (5*n+6)/(n^2*(n^2+n+2))
+
+a4.hat <- gamma/p *( tr(S4) -4/n*tr(S3)*tr(S) -eta*tr(S2)^2 +mu*tr(S2)*tr(S)^2 -nu*tr(S)^4)
+```
+
+
+```{r SVD}
+
+svd()
+
+```
+
+
+
+
+
