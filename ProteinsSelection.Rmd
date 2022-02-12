@@ -159,8 +159,8 @@ tic()
 cores <- parallel::detectCores() -2 
 cl <- makePSOCKcluster(cores) ; registerDoParallel(cl)
 
-# freqs <- variable_selection(Y,X,covar.sqare.hat, nb_repli = 1000, parallel=T) 
-# freqs %>% 
+# freqs <- variable_selection(Y,X,covar.sqare.hat, nb_repli = 1000, parallel=T)
+# freqs %>%
 #   rename( proteins = Names_of_Y, group = Names_of_X) %>%
 #   saveRDS('freqs.rds')
 
@@ -301,9 +301,19 @@ a4.hat <- gamma/p *( tr(S4) -4/n*tr(S3)*tr(S) -eta*tr(S2)^2 +mu*tr(S2)*tr(S)^2 -
 ```
 
 
-```{r SVD}
+```{r Statistique T1 et T2}
+T1 <- n/(c*sqrt(8)) * (a4.hat - 4*a3.hat + 6*a2.hat - 4*a1.hat + 1)
+T2 <- n/sqrt(8*(c^2+12*c+8)) * (a4.hat -2*a2.hat + 1)
 
-svd()
+
+alpha <- 0.05
+q <- qnorm(1-alpha/2)
+
+
+test <- function(T) ifelse(abs(T) > q, 'H0 is rejected', 'H0 is accepted')
+
+
+c(T1 = T1,T2 = T2) %>% sapply(test)
 
 ```
 
